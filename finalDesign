@@ -1,0 +1,385 @@
+/*====================================================================*/
+/* Courtney Stewart                                                   */
+/* ELEC3050 Final Project                                             */
+/*																																		*/
+/* Embedded system that controls DC motor speed and an up/down				*/
+/* decade counter on the NUCLEO-L432KC board with a 16-digit keypad.  */
+/*====================================================================*/
+
+#include "stm32l4xx.h" /*microcontroller info */
+#include <math.h>
+
+static unsigned int run; /*keeps track of if the counters are running or not */
+static unsigned int up = 1;  /*keeps track of which direction counter a is running */
+static unsigned char key = 0; /* keeps track of the value of the key button pressed */
+static unsigned int counter = 0;
+static int dutyCycle;
+static int adc_in;
+static unsigned int motorControl = 0; /* if = 0, in PWM mode. if = 1, in motor spped control mode */
+static unsigned int ADCSamplingPeriodVariable; /* toggles in each ADC sampling period, which is 1.7/64 s */
+
+void delay(int);
+void smallDelay(void);
+
+//req A: decode all 16-buttons (works)
+
+//req B: produce 7 kHz pwm signal-- fix in TIM2setup (works... probably)
+//DOUBLE CHECK PWM IS 7kHz
+
+//req C: produce DC motor drive controlled by pwm (works)
+
+//req D: up/down decade counter with 7/5s period, * starts/stops, # changes direction (works)
+
+//req E: implement feedback control of motor speed (FIX) 
+
+//tim6 is for counter
+//tim2 is for pwm duty cycle
+//tim15 is for motor speed control
+
+
+
+/* sets up GPIO pins for proper input or output */
+void GPIOPinSetup(){
+	RCC->AHB2ENR |= 0x03;										 /* Enable GPIOA clock (bit 0) */
+	
+	/* PA[5:2] input pull up */
+	GPIOA->MODER &= ~(0xFF << 4);
+	GPIOA->PUPDR &= ~(0xFF << 4);
+	GPIOA->PUPDR |= (0x55 << 4);
+	
+	/* PA[11:8] outputs default low */
+	GPIOA->MODER &= ~(0xFF << 16);
+	GPIOA->MODER |= (0x55 << 16);
+	GPIOA->BRR |= 0xF << 8;							/* set PA[11:8] to 0 */
+	
+	/* PB[6:3] outputs for display */
+	GPIOB->MODER &= ~(0xFF << 6);
+	GPIOB->MODER |= (0x55 << 6);
+	
+	/* PB7 to output ADC sampling speed */
+	GPIOB->MODER &= ~(0x3 << 14);
+	GPIOB->MODER |= (0x01 << 14);
+
+}
+/* sets up interrupt for PB0 */
+void interruptSetupPB0(){
+	/* enable SYSCFG clock only necessary for change of SYSCFG */
+	RCC->APB2ENR |= 0x01; /* Set bit 0 of APB2ENR to turn on clock for SYSCFG */
+	
+		
+	/* Configure PB0 as input for the output of the AND gate */
+	GPIOB->MODER &= ~(0x00000003); 					/* Clear PB0 mode bits */
+	
+	/* select PB0 as EXTI0 */
+	SYSCFG->EXTICR[0] &= ~SYSCFG_EXTICR1_EXTI0; //clear EXTI0 bit in config reg
+	SYSCFG->EXTICR[0] |= SYSCFG_EXTICR1_EXTI0_PB; //select PB0 as interrupt source
+	
+	/* configure and enable EXTI0 as falling-edge triggered */
+	EXTI->FTSR1 |= EXTI_FTSR1_FT0; //EXTI0 = falling-edge triggered
+	EXTI->PR1 = EXTI_PR1_PIF0; //Clear EXTI0 pending bit
+	EXTI->IMR1 |= EXTI_IMR1_IM0; //Enable EXTI0
+	
+	/* Program NVIC to clear pending bit and enable EXTI0 -- use CMSIS functions*/
+	NVIC_ClearPendingIRQ(EXTI0_IRQn); // Clear NVIC pending bit
+	NVIC_EnableIRQ(EXTI0_IRQn); //Enable IRQ	
+}
+/* set up TIM2, used for PWM */
+void timer2Setup(){
+	RCC->APB1ENR1 |= 0x01;					/* turn on TIM2 */
+	
+	TIM2->CR1 |= 0x01;							/* enable timer counter */
+	
+	TIM2->CCMR1 &= 0x00000003;		/* clear CC1S bits to put into output mode */
+	
+	TIM2->CCMR1 &= ~0x00000070;		/* clear bits [6:4] */
+	TIM2->CCMR1 |= 0x00000060;		/* set bits [6:4] to 110 */ 
+	
+	TIM2->CCER &= ~0x00000003;			/* clear CC1 E & P */
+	TIM2->CCER |= 0x00000001;				/* set CC1 E */
+	
+	TIM2->CCR1 = 0x00;							/* set duty cycle to 0 as default */
+	
+	/* for 7kHz */
+	TIM2->ARR = 0x231;							/* 99 in decimal */
+	TIM1->PSC = 0x00;								/* might have to adjust bc ends up being ~6,667 kHz */
+	
+	/* for 1kHz */
+	//TIM2->ARR = 0x18F;							/* 399 in decimal */
+	//TIM2->PSC = 0x9;								/* just 9 nothing special */
+	
+	/* for 100 Hz */
+	//TIM2->ARR = 0x18F;						/* 399 */
+	//TIM2->PSC = 0x63;							/* 99 */
+	
+	/* for 10kHz */
+	//TIM2->ARR = 0x18f;						/* 399 */
+	//TIM2->PSC = 0x00;							/* just set her to 0 */
+	
+	
+	NVIC_ClearPendingIRQ(TIM2_IRQn); // Clear NVIC pending bit
+	NVIC_EnableIRQ(TIM2_IRQn); //Enable IRQ	
+}
+/* set up TIM6, used for counter */
+void timer6Setup(){
+	RCC->APB1ENR1 |= 0x10; 			/* turn on clock for timer 6 */
+	TIM6->ARR = 985;						/* PWM period = timer clock freq/desired PWM */
+	TIM6->PSC = 2795;						/* want 1.4 s period */	
+	TIM6->CR1 |= 0x01;					/* ideally PSC = 2799 and ARR = 999 */	
+	TIM6->DIER |= 0x01;
+	
+	
+	NVIC_ClearPendingIRQ(TIM6_IRQn); // Clear NVIC pending bit
+	NVIC_EnableIRQ(TIM6_IRQn); //Enable IRQ	
+	
+}
+/* set up TIM7 for motor speed control output */
+void timer7Setup(){
+	//TIM7 is on APB1 at bit 5
+	RCC->APB1ENR1 |= 0x00000020;		/* turn on clock for timer 7 */
+	
+	TIM7->ARR = 399;							/* sampling speed = 1.4/64 s */
+	TIM7->PSC = 218;							/* sampling speed = 0.021875s or ~46Hz */
+	TIM7->CR1 |= 0x01;
+	TIM7->DIER |= 0x01;
+		NVIC_ClearPendingIRQ(TIM7_IRQn); // Clear NVIC pending bit
+
+	NVIC_EnableIRQ(TIM7_IRQn); //Enable IRQ
+	
+	__enable_irq();
+	TIM7->CR1 |= TIM_CR1_CEN;		/* enable timer to start counting */
+	
+}
+/* Pulse Width Modulation Setup */
+/* Using PA0 as output for PWM */
+void PWMSetup(){
+	RCC->AHB2ENR |= 0x01;						/* set bit for GPIOA EN */
+	
+	GPIOA->MODER &= ~0x00000003;		/* clear MODE0[1:0] */
+	GPIOA->MODER |= 0x00000002;			/* set MODE0 to 10 */
+	
+	GPIOA->AFR[0] &= ~0x0000000F;		/* clear AFRL0 */
+	GPIOA->AFR[0] |= 0x00000001;		/* PA0 = AF1 */
+																	//TIM2_CH1 is for PA0
+}
+/* Analog-to-digital converter Setup */
+/* Using PA1 as output */
+void ADCSetup(){
+	RCC->AHB2ENR |= 0x01;						/* set bit 0 for GPIOA EN */
+	
+	GPIOA->MODER &= ~0x0C;					/* clear MODE1[1:0] */			
+	GPIOA->MODER |= 0x0C;						/* set MODE1 to 11 */
+	
+	RCC->AHB2ENR |= (0x01 << 13);		/* set ADCEN */
+	
+	RCC->CCIPR |= (0x03 << 28);			/* configure ADCSEL[1:0] */
+	
+	ADC1->CR &= ~(0x01 << 29);			/* clear deep power down mode */
+	ADC1->CR|= (0x01 << 28);				/* set ADVREGEN */
+	delay(1);												/* delay for startup */
+	
+	ADC1->CFGR |= (0x3 << 12);			/* set CONT and OVRMOD */
+	
+	ADC1->SQR1 &= ~0x0F;						/* clear L[3:0] for sequence length */
+	ADC1->SQR1 |= 0x06 << 6;				
+	
+	ADC1->SQR1 &= ~(0x1F << 6);			/* clear SQ1 (5 bits) */
+	ADC1->SQR1 |= 0x06 << 6;				/* configure to 0x6 */
+	
+	ADC1->CR |= 0x1;								/* set ADC enable bit */
+	
+	while (!(ADC1->ISR & 0x00000001));	/* check ADC ready bit) */
+	
+	ADC1->CR |= 0x01 << 2;					/* set ADSTART */
+}
+/* Interrupt service routine when PB0 goes low (falling edge triggered) */
+void EXTI0_IRQHandler(){
+	__disable_irq();		/*disable interrupts from coming in */
+
+	/* instantiate variables */
+	int volatile row, column, rowNumber, columnNumber, i;
+	
+	unsigned static char keypadArray[4][4] = {
+		{0xD, 0xF, 0x0, 0xE},				/* Have to make it a little backwards from */
+		{0xC, 0x9, 0x8, 0x7},				/* the way the keypad actually looks so    */
+		{0xB, 0x6, 0x5, 0x4},				/* 0x1 is in [0][0] spot. 								 */
+		{0xA, 0x3, 0x2, 0x1}				/* also # is 0xF and * is 0xE							 */
+	};
+		
+	row = ((GPIOA->IDR >> 2) & 0xF) ^ 0xF;			/* pull in row values, masking the ones we don't need, flipping */
+	
+	for(i=8; i>0; i>>=1){												/* loop through from left to right */
+		GPIOA->BSRR |= (i << 8);									/* shifting the BSR to shift the value */
+		smallDelay();															/* give the processor a lil time */
+		if(GPIOA->IDR & (row << 2)){							/* check if output and row value = 1 */
+			column = i;															/* if so we've found the value */
+		}
+		GPIOA->BRR |= (i << 8);										/* shifting the value */
+	}
+		
+		rowNumber = round(log2(row));								/* get the row # */
+		columnNumber = round(log2(column));					/* get the column # */
+		key = keypadArray[rowNumber][columnNumber];	/* set key value to right value */
+	
+		/* if the button pressed was * (0xE) we need to toggle stopwatch */
+		if(key==0xE){
+				TIM6->CR1 ^= 0x01;			/* toggling the timer counting */
+				TIM6->DIER ^= 0x01;
+			}
+
+		/* if the button pressed was # (0xF) we need to change the direction of the counter */
+		else if (key==0xF){
+				if (up == 1){
+					up = 0;
+				}else{
+					up = 1;
+				}												
+		}
+	
+		/* if B has been pressed, we need to toggle to motor control mode */
+		else if (key==0xB){
+			if (motorControl == 1){
+				motorControl = 0;
+			}else{
+				motorControl = 1;
+			}
+		}
+		
+		if(motorControl == 0){
+			if(key <= 10){
+				dutyCycle = (double)key/10 * (TIM2->ARR + 1);			/* calculate duty cycle associated with key press */
+				TIM2->CCR1 = dutyCycle;										/* set CCR1 to associated duty cycle value */
+				}
+			
+			
+		}
+		
+		
+		smallDelay();											/* debouncing delay */
+		EXTI->PR1 = EXTI_PR1_PIF0;				/*clear interrupt flag */
+		NVIC_ClearPendingIRQ(EXTI0_IRQn);	/*clear pending status */
+		__enable_irq();										/* enable interrupts */
+	}
+/* timer handler (for counter) */
+void TIM6_IRQHandler(){ 
+	TIM6->SR &= ~0x01;
+	
+	if (up){
+		if(counter>=9){											/* check if counter is 9 */
+				counter=0;											/* if so reset to 0 */
+				GPIOB->BRR |= 0xF <<3;
+		}else{															/* if not, increment */
+				counter++;
+				GPIOB->BRR |= 0xF << 3;
+				GPIOB->BSRR |= counter << 3;
+					}
+			}
+	else if (up == 0) {
+		if (counter == 0){
+			counter = 9;
+			GPIOB->BRR |= 0x0 <<3;				/* THIS COULD BE WRONG */
+		}else{
+			counter--;
+				GPIOB->BRR |= 0xF << 3;
+				GPIOB->BSRR |= counter << 3;
+		}
+	}		
+		NVIC_ClearPendingIRQ(TIM6_IRQn); // Clear NVIC pending bit		
+	}
+/* Timer handler for motor control mode */
+void TIM7_IRQHandler(){
+		TIM7->SR &= ~0x01;
+	int change = 10;
+	
+	if(motorControl == 1){						/* make sure we're in motor controlling mode */
+		
+		if(key==0x1){									/* key 1 = 40% */
+					//TIM2->CCR1 = 40; 				/* ADC value 0x19B */
+			//check what ADC value is, if lower increase dutyCycle, if higher decrease dutyCycle
+			
+					if(ADC1->DR < 0x19B){
+							TIM2->CCR1 = TIM2->CCR1 + change;
+					} else {
+						TIM2->CCR1 = TIM2->CCR1 - change;
+					}
+			
+		}else if(key==0x2){						/* key 2 = 60% */
+					//TIM2->CCR1 = 60;				/* ADC value 0x437 */
+			
+					if(ADC1->DR < 0x360){
+							TIM2->CCR1 = TIM2->CCR1 + change;
+					} else {
+						TIM2->CCR1 = TIM2->CCR1 - change;
+					}
+			
+			
+		}else if(key==0x3){						/* key 3 = 80% */
+					//TIM2->CCR1 = 80;				/* ADC value 0x542 */
+					
+					if(ADC1->DR < 0x51B){
+							TIM2->CCR1 = TIM2->CCR1 + change;
+					} else {
+						TIM2->CCR1 = TIM2->CCR1 - change;
+					}
+			
+			
+			
+		}else if(key==4){							/* key 4 = 100% */
+				//TIM2->CCR1 = 100;
+																	/* ADC value 0x690 */
+
+				  if(ADC1->DR < 0x690){
+							TIM2->CCR1 = TIM2->CCR1 + change;
+					} else {
+						TIM2->CCR1 = TIM2->CCR1 - change;
+					}
+			
+		}
+		
+	}
+	
+	//Toggle variable to show sampling period is 1.4/64 s 
+	//or 0.021875s
+	if (ADCSamplingPeriodVariable==0){
+		ADCSamplingPeriodVariable = 1;
+		//GPIOB->ODR |= 1 << 7;
+		
+	} else {
+		ADCSamplingPeriodVariable = 0;
+		//GPIOB->ODR &= ~(1 << 7);
+	}
+	
+		NVIC_ClearPendingIRQ(TIM7_IRQn); // Clear NVIC pending bit
+	
+}
+/* delays for about 0.008 second */
+void delay(int k){
+	int volatile i, j, n;						/*dummy variables*/
+	for(i=0; i<k; i++){							/*outer loop*/
+		for(j=0; j<2000; j++){				/*inner loop*/
+			n=j;												/*dummy operation */
+		}
+	}
+}
+/* delay for small pause after writing to output before reading input */
+void smallDelay(){
+	int volatile i, j;				/* dummy variable */
+	for (i=0; i<4; i++){			/* useless function */
+		j = i;
+	}	
+}
+/*=======================*/
+/* Main function         */
+/*=======================*/
+int main(void){
+	GPIOPinSetup();						/* set up GPIO */
+	interruptSetupPB0();			/* set up interrupts */
+	timer2Setup();						/* set up PWM timer */
+	timer6Setup();						/* set up counter timer */
+	timer7Setup();						/* set up motor control timer */
+	PWMSetup();								/* set up PWM */
+	ADCSetup();								/* set up ADC */
+		__enable_irq();					/* enable interrupts */
+	
+	while(1){									/*infinite loop*/
+	}
+}
