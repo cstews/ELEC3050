@@ -1,12 +1,12 @@
 /*====================================================================*/
-/* Courtney Stewart                                                   */
-/* ELEC3050 Lab 9                                                     */
-/* Analog-to-Digital Converter																				*/
-/* Used in conjunction with rectifier and filter circuit to						*/
-/* convert ac signal from motor to dc signal, which is processed 			*/
-/* by this program to change duty cycles/speed of a motor.						*/
-/* By using each of the key pads 0-A the motor speed will increase   	*/
-/* by a factor of 10% (0%, 10%,...,100%) 															*/
+/* Courtney Stewart                                                    */
+/* ELEC3050 Lab 9                                                      */
+/* Analog-to-Digital Converter					       */
+/* Used in conjunction with rectifier and filter circuit to	       */
+/* convert ac signal from motor to dc signal, which is processed       */
+/* by this program to change duty cycles/speed of a motor.	       */
+/* By using each of the key pads 0-A the motor speed will increase     */
+/* by a factor of 10% (0%, 10%,...,100%) 			       */
 /*====================================================================*/
 
 #include "stm32l4xx.h" /*microcontroller info */
@@ -22,7 +22,7 @@ void smallDelay(void);
 
 /* sets up GPIO pins for proper input or output */
 void GPIOPinSetup(){
-	RCC->AHB2ENR |= 0x03;										 /* Enable GPIOA clock (bit 0) */
+	RCC->AHB2ENR |= 0x03;				/* Enable GPIOA clock (bit 0) */
 	
 	/* PA[5:2] input pull up */
 	GPIOA->MODER &= ~(0xFF << 4);
@@ -32,7 +32,7 @@ void GPIOPinSetup(){
 	/* PA[11:8] outputs default low */
 	GPIOA->MODER &= ~(0xFF << 16);
 	GPIOA->MODER |= (0x55 << 16);
-	GPIOA->BRR |= 0xF << 8;							/* set PA[11:8] to 0 */
+	GPIOA->BRR |= 0xF << 8;				/* set PA[11:8] to 0 */
 	
 	/* PB[6:3] outputs for display */
 	GPIOB->MODER &= ~(0xFF << 6);
@@ -64,10 +64,10 @@ void interruptSetupPB0(){
 /* set up TIM6 */
 void timer6Setup(){
 	RCC->APB1ENR1 |= 0x10; 			/* turn on clock for timer 6 */
-	TIM6->ARR = 3999;						/* PWM period = timer clock freq/desired PWM */
-															/* 						= 4MHz/1kHz = 4000 */
-	TIM6->PSC = 99;							/* 1kHz */
-	TIM6->CR1 |= 0x01;					/* 399 and 9? */
+	TIM6->ARR = 3999;			/* PWM period = timer clock freq/desired PWM */
+						/* = 4MHz/1kHz = 4000 */
+	TIM6->PSC = 99;				/* 1kHz */
+	TIM6->CR1 |= 0x01;			/* 399 and 9? */
 	TIM6->DIER |= 0x01;
 	
 	RCC->APB1ENR1 |= 0x01; 		/* turn on clock for timer 2 */
@@ -86,14 +86,14 @@ void timer6Setup(){
 /* Pulse Width Modulation Setup */
 /* Using PA0 as output for PWM */
 void PWMSetup(){
-	RCC->AHB2ENR |= 0x01;						/* set bit for GPIOA EN */
+	RCC->AHB2ENR |= 0x01;			/* set bit for GPIOA EN */
 	
 	GPIOA->MODER &= ~0x00000003;		/* clear MODE0[1:0] */
 	GPIOA->MODER |= 0x00000002;			/* set MODE0 to 10 */
 	
 	GPIOA->AFR[0] &= ~0x0000000F;		/* clear AFRL0 */
 	GPIOA->AFR[0] |= 0x00000001;		/* PA0 = AF1 */
-																	//TIM2_CH1 is for PA0
+						//TIM2_CH1 is for PA0
 }
 /* Analog-to-digital converter Setup */
 /* Using PA1 as output */
@@ -163,8 +163,8 @@ void EXTI0_IRQHandler(){
 	unsigned static char keypadArray[4][4] = {
 		{0xD, 0xF, 0x0, 0xE},				/* Have to make it a little backwards from */
 		{0xC, 0x9, 0x8, 0x7},				/* the way the keypad actually looks so    */
-		{0xB, 0x6, 0x5, 0x4},				/* 0x1 is in [0][0] spot. 								 */
-		{0xA, 0x3, 0x2, 0x1}				/* also # is 0xF and * is 0xE							 */
+		{0xB, 0x6, 0x5, 0x4},				/* 0x1 is in [0][0] spot. 	 */
+		{0xA, 0x3, 0x2, 0x1}				/* also # is 0xF and * is 0xE	 */
 	};
 		
 	row = ((GPIOA->IDR >> 2) & 0xF) ^ 0xF;			/* pull in row values, masking the ones we don't need, flipping */
